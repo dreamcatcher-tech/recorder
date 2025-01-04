@@ -31,6 +31,6 @@ jobs:
         with:
           project: "recorder"
           entrypoint: "./server/main.ts"
-          root: "dist"
+          root: ""
           
           
