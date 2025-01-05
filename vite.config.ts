@@ -9,6 +9,13 @@ export default defineConfig({
   root: "./client",
   server: {
     port: 3000,
+    proxy: {
+      // Regex to match all your existing endpoints
+      "^/(files|upload|events|broadcast-record|name-change)(.*)": {
+        target: "http://localhost:8001",
+        changeOrigin: true,
+      },
+    },
   },
   plugins: [
     react(),

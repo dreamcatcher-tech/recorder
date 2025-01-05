@@ -1,17 +1,28 @@
-'use client';
-import React, { useState, useEffect, useRef } from "react";
+"use client";
+import React, { useEffect, useState } from "react";
+
+// Custom hook for local recording
+import { useLocalRecorder } from "./hooks/useLocalRecorder.ts";
+
+// UI Components
+import { NameInput } from "./components/NameInput.tsx";
+import { RecordButton } from "./components/RecordButton.tsx";
+import { ParticipantsList } from "./components/ParticipantsList.tsx";
+import { RecordingsList } from "./components/RecordingsList.tsx";
 
 interface ParticipantMap {
   [id: string]: string;
 }
 
-export const App = () => {
+export default function App() {
+  // Endpoints
   const SSE_URL = "/events";
   const LIST_URL = "/files";
   const UPLOAD_URL = "/upload";
   const NAME_URL = "/name-change";
   const BC_RECORD_URL = "/broadcast-record";
 
+  // Participant ID / Name
   const [myId, setMyId] = useState(() => {
     const stored = localStorage.getItem("my-participant-id");
     if (stored) return stored;
@@ -19,175 +30,148 @@ export const App = () => {
     localStorage.setItem("my-participant-id", newId);
     return newId;
   });
-  const [myName, setMyName] = useState(`Guest_${Math.floor(Math.random() * 1000)}`);
+  const [myName, setMyName] = useState(
+    `Guest_${Math.floor(Math.random() * 1000)}`
+  );
+
+  // Server-managed state
   const [participants, setParticipants] = useState<ParticipantMap>({});
   const [files, setFiles] = useState<{ key: string; size: number }[]>([]);
-
-  const [recording, setRecording] = useState(false);
-  const [recordingPending, setRecordingPending] = useState(false);
+  
+  // For synchronizing local and server start times
   const [serverStartTime, setServerStartTime] = useState<number | null>(null);
 
-  const recorderRef = useRef<MediaRecorder | null>(null);
-  const chunksRef = useRef<BlobPart[]>([]);
+  // Local recorder custom hook
+  const {
+    isRecording,
+    isPending,
+    startRecording,
+    stopRecording,
+    setIsPending
+  } = useLocalRecorder({
+    onUpload: async (formData) => {
+      // Upload to server
+      await fetch(UPLOAD_URL, {
+        method: "POST",
+        body: formData,
+      });
+      console.log("Upload complete");
+    },
+  });
 
+  // On mount, broadcast our name and fetch file list
   useEffect(() => {
-    // Connect SSE
+    broadcastNameChange(myId, myName);
+    fetchFileList();
+  }, []);
+
+  // Set up SSE listener
+  useEffect(() => {
     const sse = new EventSource(SSE_URL);
-    sse.onmessage = (msg) => {
-      if (!msg.data) return;
+
+    sse.onmessage = (event) => {
+      if (!event.data) return;
       try {
-        const data = JSON.parse(msg.data);
-        if (data.kind === "files-updated") {
-          // re-fetch files once
-          fetch(LIST_URL).then((r) => r.json()).then(setFiles);
-        } else if (data.kind === "record-command") {
-          if (data.action === "start") {
-            // Server-supplied epoch timestamp for synchronization
-            setServerStartTime(data.timestamp);
-            setRecordingPending(false);
-            startLocalRecording();
-          } else if (data.action === "stop") {
-            stopLocalRecording();
-          }
-        } else if (data.kind === "name-change") {
-          const participants: ParticipantMap = data.participants;
-          setParticipants(participants);
+        const data = JSON.parse(event.data);
+
+        switch (data.kind) {
+          case "files-updated":
+            // Re-fetch
+            fetchFileList();
+            break;
+
+          case "record-command":
+            if (data.action === "start") {
+              // Let local UI know the server started recording at a certain timestamp
+              setServerStartTime(data.timestamp);
+              setIsPending(false);
+              startRecording();
+            } else if (data.action === "stop") {
+              stopRecording();
+            }
+            break;
+
+          case "name-change":
+            // Entire updated participants map
+            setParticipants(data.participants);
+            break;
         }
-      } catch {
-        // no-op
+      } catch (err) {
+        console.error("SSE parse error:", err);
       }
     };
-    sse.onerror = () => console.log("SSE error");
-    return () => sse.close();
-  }, []);
 
-  useEffect(() => {
-    // On mount, let the server know our name
-    broadcastNameChange(myId, myName);
-    fetch(LIST_URL).then((r) => r.json()).then(setFiles);
-  }, []);
+    sse.onerror = () => {
+      console.error("SSE error");
+    };
 
-  const broadcastNameChange = (id: string, name: string) => {
+    return () => {
+      sse.close();
+    };
+  }, [startRecording, stopRecording, setIsPending]);
+
+  // Helpers
+  function fetchFileList() {
+    fetch(LIST_URL)
+      .then((r) => r.json())
+      .then(setFiles)
+      .catch(console.error);
+  }
+
+  function broadcastNameChange(id: string, name: string) {
     fetch(NAME_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id, name }),
     }).catch(console.error);
-  };
+  }
 
-  const handleRecordClick = () => {
-    if (!recording && !recordingPending) {
-      // user wants to start recording
-      setRecordingPending(true);
+  // UI actions
+  function handleNameChange(newName: string) {
+    setMyName(newName);
+    broadcastNameChange(myId, newName);
+  }
+
+  function handleRecordClick() {
+    if (!isRecording && !isPending) {
+      // user wants to start
+      setIsPending(true);
       fetch(BC_RECORD_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "start" }),
       }).catch((err) => {
         console.error(err);
-        setRecordingPending(false);
+        setIsPending(false);
       });
     } else {
-      // user wants to stop recording
+      // user wants to stop
       fetch(BC_RECORD_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ action: "stop" }),
       }).catch(console.error);
     }
-  };
-
-  const startLocalRecording = async () => {
-    if (recording) return;
-    setRecording(true);
-    chunksRef.current = [];
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-    const recorder = new MediaRecorder(stream, {
-      mimeType: "audio/webm;codecs=opus",
-      audioBitsPerSecond: 320000, // Highest commonly available quality
-    });
-    recorderRef.current = recorder;
-    recorder.ondataavailable = (e) => {
-      if (e.data.size > 0) chunksRef.current.push(e.data);
-    };
-    recorder.start();
-  };
-
-  const stopLocalRecording = () => {
-    if (!recorderRef.current) return;
-    recorderRef.current.stop();
-    recorderRef.current = null;
-    setRecording(false);
-    setRecordingPending(false);
-
-    const blob = new Blob(chunksRef.current, { type: "audio/webm" });
-    const fileName = `${myName}_${Date.now()}.webm`;
-    const formData = new FormData();
-    formData.append("audioFile", new File([blob], fileName));
-    // Include the synchronized start time so the server can store/metadata it
-    if (serverStartTime != null) {
-      formData.append("startTimestamp", serverStartTime.toString());
-    }
-
-    fetch(UPLOAD_URL, { method: "POST", body: formData })
-      .then(() => console.log("upload complete"))
-      .catch(console.error);
-  };
-
-  const handleNameChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const newName = e.target.value;
-    setMyName(newName);
-    broadcastNameChange(myId, newName);
-  };
+  }
 
   return (
     <div className="p-4">
       <h1 className="text-xl font-bold mb-4">Mic Splice</h1>
-      <div className="flex items-center gap-2 mb-2">
-        <label>Your Name:</label>
-        <input
-          className="border rounded p-1"
-          value={myName}
-          onChange={handleNameChange}
-        />
-      </div>
-      <button
+      
+      <NameInput value={myName} onChange={handleNameChange} />
+
+      <RecordButton
+        isRecording={isRecording}
+        isPending={isPending}
         onClick={handleRecordClick}
-        disabled={recordingPending || recording}
-        className="ml-2 px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 transition-colors"
-      >
-        {recordingPending
-          ? "Waiting to start…"
-          : recording
-          ? "Stop Recording"
-          : "Start Recording"}
-      </button>
+      />
 
-      <div className="mt-4">
-        <h2 className="font-semibold">Participants:</h2>
-        <ul>
-          {Object.entries(participants).map(([pid, pname]) => (
-            <li key={pid} className={pid === myId ? "font-bold" : ""}>
-              {pname}
-            </li>
-          ))}
-        </ul>
-      </div>
+      <ParticipantsList
+        participants={participants}
+        currentUserId={myId}
+      />
 
-      <div className="mt-4">
-        <h2 className="font-semibold">Available Recordings:</h2>
-        <ul>
-          {files.map((f) => (
-            <li key={f.key}>
-              <a href={`/${encodeURIComponent(f.key)}`} target="_blank" rel="noreferrer">
-                {f.key} ({f.size} bytes)
-              </a>
-            </li>
-          ))}
-        </ul>
-      </div>
+      <RecordingsList files={files} />
     </div>
   );
-};
-
-export default App;
+}

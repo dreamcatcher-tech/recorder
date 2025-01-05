@@ -2,6 +2,7 @@ import { Application } from "@oak/oak/application";
 import { Router } from "@oak/oak/router";
 import { Context } from "@oak/oak/context";
 import routeStaticFilesFrom from "./util/routeStaticFilesFrom.ts";
+import "@std/dotenv/load";
 
 import { S3Client, PutObjectCommand, ListObjectsV2Command, GetObjectCommand } from "@aws-sdk/client-s3";
 
@@ -22,8 +23,8 @@ const s3 = new S3Client({
   region: Deno.env.get("B2_REGION"),
   endpoint: Deno.env.get("B2_ENDPOINT"),
   credentials: {
-    accessKeyId: Deno.env.get("B2_KEY_ID") ?? "",
-    secretAccessKey: Deno.env.get("B2_APPLICATION_KEY") ?? "",
+    accessKeyId: Deno.env.get("B2_KEY_ID"),
+    secretAccessKey: Deno.env.get("B2_APPLICATION_KEY"),
   },
 });
 
@@ -47,8 +48,12 @@ const broadcastEvent = (kind: string, payload: Record<string, unknown>) => {
 };
 
 async function listFilesInBucket() {
-  const bucketName = Deno.env.get("B2_BUCKET_NAME") ?? "";
-  const cmd = new ListObjectsV2Command({ Bucket: bucketName });
+  const bucketName = Deno.env.get("B2_BUCKET_NAME")
+  if (!bucketName) {
+    throw new Error("Bucket name is not set");
+  }
+  console.log("Listing files in bucket:", bucketName);
+  const cmd = new ListObjectsV2Command({ Bucket: bucketName, });
   const resp = await s3.send(cmd);
   return (resp.Contents ?? []).map((c: { Key?: string; Size?: number }) => ({
     key: c.Key ?? "",
@@ -76,23 +81,24 @@ router.get("/events", (ctx) => {
 // Upload audio
 router.post("/upload", async (ctx: Context) => {
   const bucketName = Deno.env.get("B2_BUCKET_NAME") ?? "";
-  const form = await ctx.request.body({ type: "form-data" }).value.read({ maxSize: 50_000_000 });
-  if (!form.files?.length) {
+  const form = await ctx.request.body.formData()
+
+  const file = form.get("file");
+  if (!file || !(file instanceof File)) {
     ctx.throw(400, "No file uploaded");
   }
-  const fileInfo = form.files[0];
-  if (!fileInfo.filename || !fileInfo.content) {
-    ctx.throw(400, "File content missing");
-  }
+
+  const filename = file.name;
+  const content = await file.arrayBuffer();
 
   // Optional: read 'startTimestamp' from fields to keep track of start time for sync
-  const startTimestamp = form.fields?.startTimestamp || "";
+  const startTimestamp = form.get("startTimestamp") || "";
 
   const putCmd = new PutObjectCommand({
     Bucket: bucketName,
-    Key: fileInfo.filename,
-    Body: await Deno.readFile(fileInfo.filename),
-    ContentType: fileInfo.contentType ?? "application/octet-stream",
+    Key: filename,
+    Body: new Uint8Array(content),
+    ContentType: file.type || "application/octet-stream",
     Metadata: {
       startTimestamp,
     },
@@ -145,7 +151,7 @@ router.get("/:filename", async (ctx) => {
 
 // Broadcast record command (with epoch timestamp if starting)
 router.post("/broadcast-record", async (ctx) => {
-  const { action } = await ctx.request.body({ type: "json" }).value;
+  const { action } = await ctx.request.body.json();
   if (action === "start") {
     BROADCAST_CHANNEL.postMessage({
       kind: "RECORD_COMMAND",
@@ -159,7 +165,7 @@ router.post("/broadcast-record", async (ctx) => {
 
 // Name change
 router.post("/name-change", async (ctx) => {
-  const { id, name } = await ctx.request.body({ type: "json" }).value;
+  const { id, name } = await ctx.request.body.json();
   participants.set(id, { id, name });
   const participantsObj: Record<string, string> = {};
   for (const [pid, pinfo] of participants) {

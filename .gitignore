@@ -25,3 +25,4 @@ dist-ssr
 
 client/.vite
 concat.txt
+.env
