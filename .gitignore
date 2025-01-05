@@ -24,3 +24,4 @@ dist-ssr
 *.sw?
 
 client/.vite
+concat.txt

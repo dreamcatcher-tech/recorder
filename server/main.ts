@@ -1,17 +1,169 @@
-import { Application } from "jsr:@oak/oak/application";
-import { Router } from "jsr:@oak/oak/router";
+import { Application } from "@oak/oak/application";
+import { Router } from "@oak/oak/router";
+import { Context } from "@oak/oak/context";
 import routeStaticFilesFrom from "./util/routeStaticFilesFrom.ts";
 
-export const app = new Application();
+import { S3Client, PutObjectCommand, ListObjectsV2Command, GetObjectCommand } from "@aws-sdk/client-s3";
+import { readableStreamFromReader } from "https://deno.land/std@0.186.0/streams/conversion.ts";
+
+const app = new Application();
 const router = new Router();
 
+const BROADCAST_CHANNEL = new BroadcastChannel("global-room");
+
+// Minimal in-memory state
+type Participant = { id: string; name: string };
+const participants = new Map<string, Participant>();
+
+// We'll store a list of SSE connections:
+const sseControllers: ReadableStreamDefaultController<string>[] = [];
+
+// S3 client (Backblaze example config from .env)
+const s3 = new S3Client({
+  region: Deno.env.get("B2_REGION"),
+  endpoint: Deno.env.get("B2_ENDPOINT"),
+  credentials: {
+    accessKeyId: Deno.env.get("B2_KEY_ID") ?? "",
+    secretAccessKey: Deno.env.get("B2_APPLICATION_KEY") ?? "",
+  },
+});
+
+// BroadcastChannel messages -> SSE
+BROADCAST_CHANNEL.onmessage = (e) => {
+  const { kind, payload } = e.data;
+  if (kind === "FILES_UPDATED") {
+    broadcastEvent("files-updated", {});
+  } else if (kind === "RECORD_COMMAND") {
+    broadcastEvent("record-command", payload);
+  } else if (kind === "NAME_CHANGE") {
+    broadcastEvent("name-change", payload);
+  }
+};
+
+const broadcastEvent = (kind: string, payload: Record<string, unknown>) => {
+  const msg = JSON.stringify({ kind, ...payload });
+  for (const controller of sseControllers) {
+    controller.enqueue(`data: ${msg}\n\n`);
+  }
+};
+
+async function listFilesInBucket() {
+  const bucketName = Deno.env.get("B2_BUCKET_NAME") ?? "";
+  const cmd = new ListObjectsV2Command({ Bucket: bucketName });
+  const resp = await s3.send(cmd);
+  return (resp.Contents ?? []).map((c) => ({
+    key: c.Key ?? "",
+    size: c.Size ?? 0,
+  }));
+}
+
+// SSE route
+router.get("/events", (ctx) => {
+  const body = new ReadableStream<string>({
+    start(controller) {
+      sseControllers.push(controller);
+    },
+    cancel() {
+      // SSE closed
+    },
+  });
+
+  ctx.response.headers.set("Content-Type", "text/event-stream");
+  ctx.response.headers.set("Cache-Control", "no-cache");
+  ctx.response.headers.set("Connection", "keep-alive");
+  ctx.response.body = body;
+});
+
+// Upload audio
+router.post("/upload", async (ctx) => {
+  const bucketName = Deno.env.get("B2_BUCKET_NAME") ?? "";
+  const form = await ctx.request.body({ type: "form-data" }).value.read({ maxSize: 50_000_000 });
+  if (!form.files?.length) {
+    ctx.throw(400, "No file uploaded");
+  }
+  const fileInfo = form.files[0];
+  if (!fileInfo.filename || !fileInfo.content) {
+    ctx.throw(400, "File content missing");
+  }
+
+  const putCmd = new PutObjectCommand({
+    Bucket: bucketName,
+    Key: fileInfo.filename,
+    Body: await Deno.readFile(fileInfo.filename),
+    ContentType: fileInfo.contentType ?? "application/octet-stream",
+  });
+  // the `form.files[0].content` is already on disk in Deno Deploy's tmp, so we must read it
+  // using `fileInfo.filename` path
+
+  await s3.send(putCmd);
+
+  // Broadcast that files changed
+  BROADCAST_CHANNEL.postMessage({ kind: "FILES_UPDATED" });
+  ctx.response.body = "OK";
+});
+
+// List files
+router.get("/files", async (ctx) => {
+  const files = await listFilesInBucket();
+  ctx.response.body = files;
+});
+
+// Serve a single file from S3
+router.get("/:filename", async (ctx) => {
+  // Only if the path doesn't match known routes above
+  const bucketName = Deno.env.get("B2_BUCKET_NAME") ?? "";
+  const key = ctx.params.filename;
+  if (!key) {
+    ctx.throw(404, "No key");
+  }
+
+  try {
+    const getCmd = new GetObjectCommand({ Bucket: bucketName, Key: key });
+    const result = await s3.send(getCmd);
+    if (!result.Body) {
+      ctx.throw(404, "Not found");
+    }
+    const stream = readableStreamFromReader(result.Body as Deno.Reader);
+    ctx.response.type = result.ContentType ?? "application/octet-stream";
+    ctx.response.body = stream;
+  } catch {
+    ctx.throw(404, "Not found");
+  }
+});
+
+// Broadcast record command
+router.post("/broadcast-record", async (ctx) => {
+  const { action } = await ctx.request.body({ type: "json" }).value;
+  BROADCAST_CHANNEL.postMessage({ kind: "RECORD_COMMAND", payload: { action } });
+  ctx.response.body = "OK";
+});
+
+// Name change
+router.post("/name-change", async (ctx) => {
+  const { id, name } = await ctx.request.body({ type: "json" }).value;
+  participants.set(id, { id, name });
+  const participantsObj: Record<string, string> = {};
+  for (const [pid, pinfo] of participants) {
+    participantsObj[pid] = pinfo.name;
+  }
+  BROADCAST_CHANNEL.postMessage({ kind: "NAME_CHANGE", payload: { participants: participantsObj } });
+  ctx.response.body = "OK";
+});
+
 app.use(router.routes());
-app.use(routeStaticFilesFrom([
-  `${Deno.cwd()}/client/dist`,
-  `${Deno.cwd()}/client/public`,
-]));
+app.use(router.allowedMethods());
+
+// Finally serve static from dist + public
+app.use(
+  routeStaticFilesFrom([
+    `${Deno.cwd()}/client/dist`,
+    `${Deno.cwd()}/client/public`,
+  ]),
+);
 
 if (import.meta.main) {
-  console.log("Server listening on port http://localhost:8000");
+  console.log("Server listening on http://localhost:8000");
   await app.listen({ port: 8000 });
 }
+
+export { app };
