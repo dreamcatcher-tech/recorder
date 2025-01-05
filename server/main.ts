@@ -83,7 +83,7 @@ router.post("/upload", async (ctx: Context) => {
   const bucketName = Deno.env.get("B2_BUCKET_NAME") ?? "";
   const form = await ctx.request.body.formData()
 
-  const file = form.get("file");
+  const file = form.get("audioFile");
   if (!file || !(file instanceof File)) {
     ctx.throw(400, "No file uploaded");
   }
