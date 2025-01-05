@@ -22,7 +22,11 @@ export const App = () => {
   const [myName, setMyName] = useState(`Guest_${Math.floor(Math.random() * 1000)}`);
   const [participants, setParticipants] = useState<ParticipantMap>({});
   const [files, setFiles] = useState<{ key: string; size: number }[]>([]);
+
   const [recording, setRecording] = useState(false);
+  const [recordingPending, setRecordingPending] = useState(false);
+  const [serverStartTime, setServerStartTime] = useState<number | null>(null);
+
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<BlobPart[]>([]);
 
@@ -38,12 +42,14 @@ export const App = () => {
           fetch(LIST_URL).then((r) => r.json()).then(setFiles);
         } else if (data.kind === "record-command") {
           if (data.action === "start") {
+            // Server-supplied epoch timestamp for synchronization
+            setServerStartTime(data.timestamp);
+            setRecordingPending(false);
             startLocalRecording();
           } else if (data.action === "stop") {
             stopLocalRecording();
           }
         } else if (data.kind === "name-change") {
-          console.log("name-change", data);
           const participants: ParticipantMap = data.participants;
           setParticipants(participants);
         }
@@ -69,6 +75,28 @@ export const App = () => {
     }).catch(console.error);
   };
 
+  const handleRecordClick = () => {
+    if (!recording && !recordingPending) {
+      // user wants to start recording
+      setRecordingPending(true);
+      fetch(BC_RECORD_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "start" }),
+      }).catch((err) => {
+        console.error(err);
+        setRecordingPending(false);
+      });
+    } else {
+      // user wants to stop recording
+      fetch(BC_RECORD_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "stop" }),
+      }).catch(console.error);
+    }
+  };
+
   const startLocalRecording = async () => {
     if (recording) return;
     setRecording(true);
@@ -76,7 +104,7 @@ export const App = () => {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
     const recorder = new MediaRecorder(stream, {
       mimeType: "audio/webm;codecs=opus",
-      audioBitsPerSecond: 320000,
+      audioBitsPerSecond: 320000, // Highest commonly available quality
     });
     recorderRef.current = recorder;
     recorder.ondataavailable = (e) => {
@@ -90,23 +118,20 @@ export const App = () => {
     recorderRef.current.stop();
     recorderRef.current = null;
     setRecording(false);
+    setRecordingPending(false);
 
     const blob = new Blob(chunksRef.current, { type: "audio/webm" });
     const fileName = `${myName}_${Date.now()}.webm`;
     const formData = new FormData();
     formData.append("audioFile", new File([blob], fileName));
+    // Include the synchronized start time so the server can store/metadata it
+    if (serverStartTime != null) {
+      formData.append("startTimestamp", serverStartTime.toString());
+    }
 
     fetch(UPLOAD_URL, { method: "POST", body: formData })
       .then(() => console.log("upload complete"))
       .catch(console.error);
-  };
-
-  const handleRecordClick = () => {
-    fetch(BC_RECORD_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: recording ? "stop" : "start" }),
-    }).catch(console.error);
   };
 
   const handleNameChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -114,7 +139,6 @@ export const App = () => {
     setMyName(newName);
     broadcastNameChange(myId, newName);
   };
-
 
   return (
     <div className="p-4">
@@ -129,9 +153,14 @@ export const App = () => {
       </div>
       <button
         onClick={handleRecordClick}
+        disabled={recordingPending || recording}
         className="ml-2 px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 transition-colors"
       >
-        {recording ? "Stop Recording" : "Start Recording"}
+        {recordingPending
+          ? "Waiting to start…"
+          : recording
+          ? "Stop Recording"
+          : "Start Recording"}
       </button>
 
       <div className="mt-4">

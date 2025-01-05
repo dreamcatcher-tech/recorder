@@ -85,14 +85,18 @@ router.post("/upload", async (ctx: Context) => {
     ctx.throw(400, "File content missing");
   }
 
+  // Optional: read 'startTimestamp' from fields to keep track of start time for sync
+  const startTimestamp = form.fields?.startTimestamp || "";
+
   const putCmd = new PutObjectCommand({
     Bucket: bucketName,
     Key: fileInfo.filename,
     Body: await Deno.readFile(fileInfo.filename),
     ContentType: fileInfo.contentType ?? "application/octet-stream",
+    Metadata: {
+      startTimestamp,
+    },
   });
-  // the `form.files[0].content` is already on disk in Deno Deploy's tmp, so we must read it
-  // using `fileInfo.filename` path
 
   await s3.send(putCmd);
 
@@ -139,10 +143,17 @@ router.get("/:filename", async (ctx) => {
   }
 });
 
-// Broadcast record command
+// Broadcast record command (with epoch timestamp if starting)
 router.post("/broadcast-record", async (ctx) => {
   const { action } = await ctx.request.body({ type: "json" }).value;
-  BROADCAST_CHANNEL.postMessage({ kind: "RECORD_COMMAND", payload: { action } });
+  if (action === "start") {
+    BROADCAST_CHANNEL.postMessage({
+      kind: "RECORD_COMMAND",
+      payload: { action, timestamp: Date.now() }, // Server's epoch time
+    });
+  } else {
+    BROADCAST_CHANNEL.postMessage({ kind: "RECORD_COMMAND", payload: { action } });
+  }
   ctx.response.body = "OK";
 });
 
