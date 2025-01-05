@@ -4,7 +4,6 @@ import { Context } from "@oak/oak/context";
 import routeStaticFilesFrom from "./util/routeStaticFilesFrom.ts";
 
 import { S3Client, PutObjectCommand, ListObjectsV2Command, GetObjectCommand } from "@aws-sdk/client-s3";
-import { readableStreamFromReader } from "https://deno.land/std@0.186.0/streams/conversion.ts";
 
 const app = new Application();
 const router = new Router();
@@ -51,7 +50,7 @@ async function listFilesInBucket() {
   const bucketName = Deno.env.get("B2_BUCKET_NAME") ?? "";
   const cmd = new ListObjectsV2Command({ Bucket: bucketName });
   const resp = await s3.send(cmd);
-  return (resp.Contents ?? []).map((c) => ({
+  return (resp.Contents ?? []).map((c: { Key?: string; Size?: number }) => ({
     key: c.Key ?? "",
     size: c.Size ?? 0,
   }));
@@ -75,7 +74,7 @@ router.get("/events", (ctx) => {
 });
 
 // Upload audio
-router.post("/upload", async (ctx) => {
+router.post("/upload", async (ctx: Context) => {
   const bucketName = Deno.env.get("B2_BUCKET_NAME") ?? "";
   const form = await ctx.request.body({ type: "form-data" }).value.read({ maxSize: 50_000_000 });
   if (!form.files?.length) {
@@ -110,7 +109,6 @@ router.get("/files", async (ctx) => {
 
 // Serve a single file from S3
 router.get("/:filename", async (ctx) => {
-  // Only if the path doesn't match known routes above
   const bucketName = Deno.env.get("B2_BUCKET_NAME") ?? "";
   const key = ctx.params.filename;
   if (!key) {
@@ -123,7 +121,17 @@ router.get("/:filename", async (ctx) => {
     if (!result.Body) {
       ctx.throw(404, "Not found");
     }
-    const stream = readableStreamFromReader(result.Body as Deno.Reader);
+    const stream = new ReadableStream({
+      async start(controller) {
+        const reader = result.Body.getReader();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          controller.enqueue(value);
+        }
+        controller.close();
+      },
+    });
     ctx.response.type = result.ContentType ?? "application/octet-stream";
     ctx.response.body = stream;
   } catch {
@@ -162,8 +170,8 @@ app.use(
 );
 
 if (import.meta.main) {
-  console.log("Server listening on http://localhost:8000");
-  await app.listen({ port: 8000 });
+  console.log("Server listening on http://localhost:8001");
+  await app.listen({ port: 8001, hostname: 'localhost' });
 }
 
 export { app };

@@ -1,5 +1,5 @@
+'use client';
 import React, { useState, useEffect, useRef } from "react";
-import { Button } from "npm:@shadcn/ui/button";
 
 interface ParticipantMap {
   [id: string]: string;
@@ -43,7 +43,9 @@ export const App = () => {
             stopLocalRecording();
           }
         } else if (data.kind === "name-change") {
-          setParticipants(data.participants || {});
+          console.log("name-change", data);
+          const participants: ParticipantMap = data.participants;
+          setParticipants(participants);
         }
       } catch {
         // no-op
@@ -113,6 +115,7 @@ export const App = () => {
     broadcastNameChange(myId, newName);
   };
 
+
   return (
     <div className="p-4">
       <h1 className="text-xl font-bold mb-4">Mic Splice</h1>
@@ -124,9 +127,12 @@ export const App = () => {
           onChange={handleNameChange}
         />
       </div>
-      <Button onClick={handleRecordClick} variant="default">
+      <button
+        onClick={handleRecordClick}
+        className="ml-2 px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 transition-colors"
+      >
         {recording ? "Stop Recording" : "Start Recording"}
-      </Button>
+      </button>
 
       <div className="mt-4">
         <h2 className="font-semibold">Participants:</h2>
