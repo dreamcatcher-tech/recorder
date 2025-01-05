@@ -9,8 +9,8 @@ import { S3Client, PutObjectCommand, ListObjectsV2Command, GetObjectCommand } fr
 const app = new Application();
 const router = new Router();
 
-const BROADCAST_CHANNEL = new BroadcastChannel("global-room");
-
+const BROADCAST_CHANNEL_TX = new BroadcastChannel("global-room");
+const BROADCAST_CHANNEL_RX = new BroadcastChannel("global-room");
 // Minimal in-memory state
 type Participant = { id: string; name: string };
 const participants = new Map<string, Participant>();
@@ -29,7 +29,7 @@ const s3 = new S3Client({
 });
 
 // BroadcastChannel messages -> SSE
-BROADCAST_CHANNEL.onmessage = (e) => {
+BROADCAST_CHANNEL_RX.onmessage = (e) => {
   const { kind, payload } = e.data;
   if (kind === "FILES_UPDATED") {
     broadcastEvent("files-updated", {});
@@ -107,7 +107,7 @@ router.post("/upload", async (ctx: Context) => {
   await s3.send(putCmd);
 
   // Broadcast that files changed
-  BROADCAST_CHANNEL.postMessage({ kind: "FILES_UPDATED" });
+  BROADCAST_CHANNEL_TX.postMessage({ kind: "FILES_UPDATED" });
   ctx.response.body = "OK";
 });
 
@@ -153,12 +153,12 @@ router.get("/:filename", async (ctx) => {
 router.post("/broadcast-record", async (ctx) => {
   const { action } = await ctx.request.body.json();
   if (action === "start") {
-    BROADCAST_CHANNEL.postMessage({
+    BROADCAST_CHANNEL_TX.postMessage({
       kind: "RECORD_COMMAND",
       payload: { action, timestamp: Date.now() }, // Server's epoch time
     });
   } else {
-    BROADCAST_CHANNEL.postMessage({ kind: "RECORD_COMMAND", payload: { action } });
+    BROADCAST_CHANNEL_TX.postMessage({ kind: "RECORD_COMMAND", payload: { action } });
   }
   ctx.response.body = "OK";
 });
@@ -171,7 +171,7 @@ router.post("/name-change", async (ctx) => {
   for (const [pid, pinfo] of participants) {
     participantsObj[pid] = pinfo.name;
   }
-  BROADCAST_CHANNEL.postMessage({ kind: "NAME_CHANGE", payload: { participants: participantsObj } });
+  BROADCAST_CHANNEL_TX.postMessage({ kind: "NAME_CHANGE", payload: { participants: participantsObj } });
   ctx.response.body = "OK";
 });
 
