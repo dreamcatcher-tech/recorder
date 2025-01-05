@@ -108,7 +108,7 @@ export default function App() {
     return () => {
       sse.close();
     };
-  }, [startRecording, stopRecording, setIsPending]);
+  }, []);
 
   // Helpers
   function fetchFileList() {
